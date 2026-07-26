@@ -1,7 +1,6 @@
 --[[
-  MalX Hub - Blox Fruit Script
-  Categories: COMBAT | FRUITS | VISUAL | WORLD | MOVEMENT | PLAYER | UTILITY
-  Features: 25+ toggles and controls
+  MalX Hub v2 — REWRITTEN
+  Fixes: GUI visibility, character respawns, key binds, remote detection, stability
 ]]
 
 -- Services
@@ -19,18 +18,33 @@ local Lighting = game:GetService("Lighting")
 
 -- Player
 local LocalPlayer = Players.LocalPlayer
-local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
-local Humanoid = Character:WaitForChild("Humanoid")
 
--- Anti-Idle
+-- ===================== DYNAMIC CHARACTER REFS =====================
+-- FIX: Never cache Character/HumanoidRootPart at top level.
+-- Always fetch fresh so respawns don't break everything.
+
+local function GetCharacter()
+    return LocalPlayer.Character
+end
+
+local function GetRoot()
+    local char = GetCharacter()
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function GetHumanoid()
+    local char = GetCharacter()
+    return char and char:FindFirstChild("Humanoid")
+end
+
+-- ===================== ANTI-IDLE =====================
 LocalPlayer.Idled:Connect(function()
     VirtualInputManager:SendKeyEvent(true, "V", false, game)
     task.wait(0.5)
     VirtualInputManager:SendKeyEvent(false, "V", false, game)
 end)
 
--- Configuration
+-- ===================== CONFIG =====================
 local Config = {
     -- Combat
     AutoFarm = false,
@@ -45,7 +59,6 @@ local Config = {
     AutoFruitFind = false,
     FruitNotifier = false,
     AutoStoreFruit = false,
-    AutoEatFruit = false,
     FruitESP = false,
     
     -- Visual
@@ -80,7 +93,7 @@ local Config = {
     SelectedTool = nil,
 }
 
--- Fruit Detection
+-- ===================== FRUIT DETECTION =====================
 local FruitNames = {
     "Fruit", "Fruit2", "Bomb", "Flame", "Ice", "Light", "Dark",
     "Magma", "Sand", "Bird", "String", "Rumble", "Door", "Ghost",
@@ -132,18 +145,48 @@ local function IsFruit(obj)
     if obj:FindFirstChild("Fruit") or obj:FindFirstChild("FruitSet") or obj:FindFirstChild("ClickDetector") then
         return true
     end
+    if obj:IsA("MeshPart") or obj:IsA("Part") then
+        local parentName = obj.Parent and obj.Parent.Name or ""
+        if string.find(string.lower(parentName), "fruit") then
+            return true
+        end
+    end
     return false
 end
 
+-- ===================== REMOTE DETECTION =====================
+-- FIX: Dynamically find remotes so the script doesn't break on game updates
+local function FindRemote(namePattern)
+    for _, v in pairs(ReplicatedStorage:GetDescendants()) do
+        if (v:IsA("RemoteEvent") or v:IsA("RemoteFunction")) and 
+           string.find(string.lower(v.Name), string.lower(namePattern)) then
+            return v
+        end
+    end
+    return nil
+end
+
+local function FindAnyRemote()
+    for _, v in pairs(ReplicatedStorage:GetDescendants()) do
+        if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
+            return v
+        end
+    end
+    return nil
+end
+
+-- ===================== ENEMY FINDING =====================
 local function GetClosestEnemy(range)
+    local root = GetRoot()
+    if not root then return nil end
     local closest, dist = nil, math.huge
     for _, v in pairs(Workspace:GetDescendants()) do
         if v:IsA("Model") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") then
             local humanoid = v:FindFirstChild("Humanoid")
             if humanoid and humanoid.Health > 0 and humanoid.MaxHealth > 0 then
                 if not Players:GetPlayerFromCharacter(v) then
-                    local root = v:FindFirstChild("HumanoidRootPart")
-                    local mag = (root.Position - HumanoidRootPart.Position).Magnitude
+                    local enemyRoot = v:FindFirstChild("HumanoidRootPart")
+                    local mag = (enemyRoot.Position - root.Position).Magnitude
                     if mag < dist and mag <= range then
                         closest = v
                         dist = mag
@@ -156,6 +199,8 @@ local function GetClosestEnemy(range)
 end
 
 local function GetClosestBoss(range)
+    local root = GetRoot()
+    if not root then return nil end
     local closest, dist = nil, math.huge
     for _, v in pairs(Workspace:GetDescendants()) do
         if v:IsA("Model") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") then
@@ -164,8 +209,8 @@ local function GetClosestBoss(range)
                 local name = v.Name or ""
                 if string.find(string.lower(name), "boss") or string.find(string.lower(name), "raid") or humanoid.MaxHealth > 5000 then
                     if not Players:GetPlayerFromCharacter(v) then
-                        local root = v:FindFirstChild("HumanoidRootPart")
-                        local mag = (root.Position - HumanoidRootPart.Position).Magnitude
+                        local enemyRoot = v:FindFirstChild("HumanoidRootPart")
+                        local mag = (enemyRoot.Position - root.Position).Magnitude
                         if mag < dist and mag <= range then
                             closest = v
                             dist = mag
@@ -178,8 +223,9 @@ local function GetClosestBoss(range)
     return closest
 end
 
--- ESP System
+-- ===================== ESP =====================
 local ESPObjects = {}
+
 local function CreateESP(instance, color, labelText)
     if ESPObjects[instance] then return end
     if not instance or not instance.Parent then return end
@@ -224,8 +270,9 @@ local function CreateESP(instance, color, labelText)
             end
             return
         end
-        if HumanoidRootPart and instance:FindFirstChild("HumanoidRootPart") then
-            local dist = (instance.HumanoidRootPart.Position - HumanoidRootPart.Position).Magnitude
+        local root = GetRoot()
+        if root and instance:FindFirstChild("HumanoidRootPart") then
+            local dist = (instance.HumanoidRootPart.Position - root.Position).Magnitude
             distanceLabel.Text = string.format("%.0f studs", dist)
         end
     end)
@@ -238,34 +285,39 @@ local function ClearESP()
     ESPObjects = {}
 end
 
--- Teleport Function
+-- ===================== TELEPORT =====================
 local function TeleportTo(cframe)
-    if Character and HumanoidRootPart then
-        HumanoidRootPart.CFrame = cframe
+    local root = GetRoot()
+    if root then
+        root.CFrame = cframe
     end
 end
 
--- ========== LOOP FUNCTIONS ==========
+-- ===================== LOOP FUNCTIONS =====================
+-- FIX: Every loop re-fetches root/humanoid dynamically
 
 -- Combat: Auto Farm
 local function AutoFarmLoop()
     while Config.AutoFarm do
-        task.wait(0.1)
+        task.wait(0.15)
+        local root = GetRoot()
+        if not root then continue end
         pcall(function()
             local target = GetClosestEnemy(Config.AimbotRange)
             if target and target:FindFirstChild("HumanoidRootPart") then
-                local root = target:FindFirstChild("HumanoidRootPart")
-                HumanoidRootPart.CFrame = CFrame.new(root.Position + Vector3.new(0, 5, 0))
+                local targetRoot = target:FindFirstChild("HumanoidRootPart")
+                root.CFrame = CFrame.new(targetRoot.Position + Vector3.new(0, 5, 0))
                 
-                local tool = LocalPlayer.Character:FindFirstChildWhichIsA("Tool")
+                local char = GetCharacter()
+                local tool = char and char:FindFirstChildWhichIsA("Tool")
                 if tool then tool:Activate() end
                 
                 if Config.AutoSkills then
                     for i = 1, 6 do
                         VirtualInputManager:SendKeyEvent(true, tostring(i), false, game)
-                        task.wait(0.05)
+                        task.wait(0.08)
                         VirtualInputManager:SendKeyEvent(false, tostring(i), false, game)
-                        task.wait(0.3)
+                        task.wait(0.35)
                     end
                 end
             end
@@ -277,11 +329,13 @@ end
 local function AimbotLoop()
     while Config.Aimbot do
         task.wait(0.05)
+        local root = GetRoot()
+        if not root then continue end
         pcall(function()
             local target = GetClosestEnemy(Config.AimbotRange)
             if target and target:FindFirstChild("HumanoidRootPart") then
-                local root = target:FindFirstChild("HumanoidRootPart")
-                HumanoidRootPart.CFrame = CFrame.lookAt(HumanoidRootPart.Position, root.Position) * CFrame.new(0, 0, 3)
+                local targetRoot = target:FindFirstChild("HumanoidRootPart")
+                root.CFrame = CFrame.lookAt(root.Position, targetRoot.Position) * CFrame.new(0, 0, 3)
             end
         end)
     end
@@ -292,7 +346,8 @@ local function FastAttackLoop()
     while Config.FastAttack do
         task.wait()
         pcall(function()
-            local tool = LocalPlayer.Character:FindFirstChildWhichIsA("Tool")
+            local char = GetCharacter()
+            local tool = char and char:FindFirstChildWhichIsA("Tool")
             if tool then
                 tool:Activate()
                 task.wait(0.01)
@@ -309,15 +364,17 @@ end
 local function BringEnemyLoop()
     while Config.BringEnemy do
         task.wait(0.3)
+        local root = GetRoot()
+        if not root then continue end
         pcall(function()
             for _, v in pairs(Workspace:GetDescendants()) do
                 if v:IsA("Model") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") then
                     local hum = v:FindFirstChild("Humanoid")
                     if hum and hum.Health > 0 and not Players:GetPlayerFromCharacter(v) then
-                        local root = v:FindFirstChild("HumanoidRootPart")
-                        local dist = (root.Position - HumanoidRootPart.Position).Magnitude
+                        local enemyRoot = v:FindFirstChild("HumanoidRootPart")
+                        local dist = (enemyRoot.Position - root.Position).Magnitude
                         if dist > 15 and dist < 300 then
-                            root.CFrame = HumanoidRootPart.CFrame * CFrame.new(0, 0, -10)
+                            enemyRoot.CFrame = root.CFrame * CFrame.new(0, 0, -10)
                         end
                     end
                 end
@@ -327,17 +384,31 @@ local function BringEnemyLoop()
 end
 
 -- Combat: Auto Quest
+-- FIX: Uses ProximityPrompt as fallback, searches more broadly
 local function AutoQuestLoop()
     while Config.AutoQuest do
         task.wait(2)
+        local root = GetRoot()
+        if not root then continue end
         pcall(function()
             for _, v in pairs(Workspace:GetDescendants()) do
-                if v:IsA("Model") and v.Name == "Quest" then
+                if v:IsA("Model") and (v.Name == "Quest" or string.find(string.lower(v.Name), "quest")) then
+                    -- Try ClickDetector
                     local clickDetector = v:FindFirstChildWhichIsA("ClickDetector")
-                    if clickDetector then
-                        HumanoidRootPart.CFrame = v:GetPivot() * CFrame.new(0, 5, 0)
+                    -- Try ProximityPrompt
+                    local proximityPrompt = v:FindFirstChildWhichIsA("ProximityPrompt")
+                    
+                    if clickDetector or proximityPrompt then
+                        root.CFrame = v:GetPivot() * CFrame.new(0, 5, 0)
                         task.wait(0.5)
-                        clickDetector:FireServer()
+                        if clickDetector then
+                            pcall(function() clickDetector:FireServer() end)
+                        end
+                        if proximityPrompt then
+                            pcall(function() proximityPrompt:InputHoldBegin() end)
+                            task.wait(0.1)
+                            pcall(function() proximityPrompt:InputHoldEnd() end)
+                        end
                         task.wait(1)
                     end
                 end
@@ -350,12 +421,15 @@ end
 local function AutoBossLoop()
     while Config.AutoBoss do
         task.wait(0.3)
+        local root = GetRoot()
+        if not root then continue end
         pcall(function()
             local boss = GetClosestBoss(5000)
             if boss and boss:FindFirstChild("HumanoidRootPart") then
-                local root = boss:FindFirstChild("HumanoidRootPart")
-                HumanoidRootPart.CFrame = CFrame.new(root.Position + Vector3.new(0, 10, 0))
-                local tool = LocalPlayer.Character:FindFirstChildWhichIsA("Tool")
+                local bossRoot = boss:FindFirstChild("HumanoidRootPart")
+                root.CFrame = CFrame.new(bossRoot.Position + Vector3.new(0, 10, 0))
+                local char = GetCharacter()
+                local tool = char and char:FindFirstChildWhichIsA("Tool")
                 if tool then
                     tool:Activate()
                     if Config.AutoSkills then
@@ -376,27 +450,32 @@ end
 local function AutoFruitFindLoop()
     while Config.AutoFruitFind do
         task.wait(1)
+        local root = GetRoot()
+        if not root then continue end
         pcall(function()
             for _, v in pairs(Workspace:GetDescendants()) do
-                if IsFruit(v) and v:IsA("BasePart") and v.Parent and not v:FindFirstChild("MalX_ESP") then
-                    local billboard = Instance.new("BillboardGui")
-                    billboard.Name = "MalX_ESP"
-                    billboard.Adornee = v
-                    billboard.Size = UDim2.new(0, 200, 0, 50)
-                    billboard.StudsOffset = Vector3.new(0, 3, 0)
-                    billboard.AlwaysOnTop = true
-                    local text = Instance.new("TextLabel")
-                    text.Size = UDim2.new(1, 0, 1, 0)
-                    text.BackgroundTransparency = 1
-                    text.TextScaled = true
-                    text.TextColor3 = Color3.fromRGB(255, 215, 0)
-                    text.TextStrokeTransparency = 0.3
-                    text.Text = "🌟 " .. v.Name
-                    text.Parent = billboard
-                    billboard.Parent = v
+                if IsFruit(v) and v:IsA("BasePart") and v.Parent then
+                    -- Mark with ESP if not already
+                    if not v:FindFirstChild("MalX_ESP") then
+                        local billboard = Instance.new("BillboardGui")
+                        billboard.Name = "MalX_ESP"
+                        billboard.Adornee = v
+                        billboard.Size = UDim2.new(0, 200, 0, 50)
+                        billboard.StudsOffset = Vector3.new(0, 3, 0)
+                        billboard.AlwaysOnTop = true
+                        local text = Instance.new("TextLabel")
+                        text.Size = UDim2.new(1, 0, 1, 0)
+                        text.BackgroundTransparency = 1
+                        text.TextScaled = true
+                        text.TextColor3 = Color3.fromRGB(255, 215, 0)
+                        text.TextStrokeTransparency = 0.3
+                        text.Text = "🌟 " .. v.Name
+                        text.Parent = billboard
+                        billboard.Parent = v
+                    end
                     
-                    if (v.Position - HumanoidRootPart.Position).Magnitude > 50 then
-                        HumanoidRootPart.CFrame = CFrame.new(v.Position + Vector3.new(0, 5, 0))
+                    if (v.Position - root.Position).Magnitude > 50 then
+                        root.CFrame = CFrame.new(v.Position + Vector3.new(0, 5, 0))
                         task.wait(0.5)
                     end
                 end
@@ -408,15 +487,18 @@ end
 -- Fruits: Fruit Notifier
 local fruitCache = {}
 local function FruitNotifierLoop()
+    fruitCache = {} -- FIX: Reset cache on toggle
     while Config.FruitNotifier do
         task.wait(0.5)
+        local root = GetRoot()
+        if not root then continue end
         pcall(function()
             for _, v in pairs(Workspace:GetDescendants()) do
                 if IsFruit(v) and v:IsA("BasePart") and v.Parent then
                     local key = v:GetFullName()
                     if not fruitCache[key] then
                         fruitCache[key] = true
-                        local dist = (v.Position - HumanoidRootPart.Position).Magnitude
+                        local dist = (v.Position - root.Position).Magnitude
                         local msg = string.format("[🍎 MalX] %s spotted! Distance: %.0f studs", v.Name, dist)
                         pcall(function()
                             local notifyGui = Instance.new("ScreenGui")
@@ -449,13 +531,19 @@ end
 local function AutoStoreFruitLoop()
     while Config.AutoStoreFruit do
         task.wait(2)
+        local root = GetRoot()
+        if not root then continue end
         pcall(function()
             for _, v in pairs(Workspace:GetDescendants()) do
-                if IsFruit(v) and v:IsA("BasePart") and v.Parent and (v.Position - HumanoidRootPart.Position).Magnitude < 25 then
-                    local args = {["Key"] = "FruitSupply", ["Item"] = v.Name}
-                    local remote = ReplicatedStorage:FindFirstChild("RemoteEvent") or ReplicatedStorage:FindFirstChild("RemoteFunction")
+                if IsFruit(v) and v:IsA("BasePart") and v.Parent and (v.Position - root.Position).Magnitude < 25 then
+                    local remote = FindRemote("store") or FindRemote("fruit") or FindAnyRemote()
                     if remote then
-                        pcall(function() remote:FireServer("StoreFruit", args) end)
+                        local args = {["Key"] = "FruitSupply", ["Item"] = v.Name}
+                        if remote:IsA("RemoteFunction") then
+                            pcall(function() remote:InvokeServer("StoreFruit", args) end)
+                        else
+                            pcall(function() remote:FireServer("StoreFruit", args) end)
+                        end
                     end
                     task.wait(0.5)
                 end
@@ -464,7 +552,7 @@ local function AutoStoreFruitLoop()
     end
 end
 
--- Visual: ESP Loops
+-- Visual: Player ESP
 local function PlayerESPLoop()
     while Config.PlayerESP do
         task.wait(0.5)
@@ -490,6 +578,7 @@ local function PlayerESPLoop()
     end
 end
 
+-- Visual: NPC ESP
 local function NpcESPLoop()
     while Config.NpcESP do
         task.wait(0.5)
@@ -498,17 +587,16 @@ local function NpcESPLoop()
                 if v:IsA("Model") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") then
                     local hum = v:FindFirstChild("Humanoid")
                     if hum and hum.Health > 0 and not Players:GetPlayerFromCharacter(v) then
-                        local root = v:FindFirstChild("HumanoidRootPart")
-                        if not root:FindFirstChild("MalX_ESP") then
+                        local npcRoot = v:FindFirstChild("HumanoidRootPart")
+                        if not npcRoot:FindFirstChild("MalX_ESP") then
                             local label = "[NPC] " .. v.Name
-                            CreateESP(root, Color3.fromRGB(255, 200, 50), label)
+                            CreateESP(npcRoot, Color3.fromRGB(255, 200, 50), label)
                         end
                     end
                 end
             end
         end)
     end
-    -- Cleanup NPC ESPs
     for _, v in pairs(ESPObjects) do
         if v.Adornee and v.Adornee.Parent then
             local parentModel = v.Adornee.Parent
@@ -521,6 +609,7 @@ local function NpcESPLoop()
     end
 end
 
+-- Visual: Chest ESP
 local function ChestESPLoop()
     while Config.ChestESP do
         task.wait(1)
@@ -562,25 +651,32 @@ end
 local function AutoRaidLoop()
     while Config.AutoRaid do
         task.wait(3)
+        local root = GetRoot()
+        if not root then continue end
         pcall(function()
-            -- Find raid NPC / enter raid
             for _, v in pairs(Workspace:GetDescendants()) do
                 if v:IsA("Model") and (string.find(string.lower(v.Name), "raid") or string.find(string.lower(v.Name), "dungeon")) then
                     local click = v:FindFirstChildWhichIsA("ClickDetector")
-                    if click then
-                        HumanoidRootPart.CFrame = v:GetPivot() * CFrame.new(0, 5, 0)
+                    local prompt = v:FindFirstChildWhichIsA("ProximityPrompt")
+                    if click or prompt then
+                        root.CFrame = v:GetPivot() * CFrame.new(0, 5, 0)
                         task.wait(0.5)
-                        click:FireServer()
+                        if click then pcall(function() click:FireServer() end) end
+                        if prompt then
+                            pcall(function() prompt:InputHoldBegin() end)
+                            task.wait(0.1)
+                            pcall(function() prompt:InputHoldEnd() end)
+                        end
                         task.wait(2)
                     end
                 end
             end
-            -- Kill enemies inside raid
             local target = GetClosestEnemy(500)
             if target and target:FindFirstChild("HumanoidRootPart") then
-                local root = target:FindFirstChild("HumanoidRootPart")
-                HumanoidRootPart.CFrame = CFrame.new(root.Position + Vector3.new(0, 5, 0))
-                local tool = LocalPlayer.Character:FindFirstChildWhichIsA("Tool")
+                local tRoot = target:FindFirstChild("HumanoidRootPart")
+                root.CFrame = CFrame.new(tRoot.Position + Vector3.new(0, 5, 0))
+                local char = GetCharacter()
+                local tool = char and char:FindFirstChildWhichIsA("Tool")
                 if tool then tool:Activate() end
             end
         end)
@@ -591,17 +687,19 @@ end
 local function AutoSeaEventLoop()
     while Config.AutoSeaEvent do
         task.wait(2)
+        local root = GetRoot()
+        if not root then continue end
         pcall(function()
-            -- Look for sea events (sharks, terror sharks, etc.)
             for _, v in pairs(Workspace:GetDescendants()) do
                 if v:IsA("Model") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") then
                     local name = string.lower(v.Name)
                     if string.find(name, "shark") or string.find(name, "fish") or string.find(name, "sea") or string.find(name, "beast") then
                         local hum = v:FindFirstChild("Humanoid")
                         if hum and hum.Health > 0 then
-                            local root = v:FindFirstChild("HumanoidRootPart")
-                            HumanoidRootPart.CFrame = CFrame.new(root.Position + Vector3.new(0, 10, 0))
-                            local tool = LocalPlayer.Character:FindFirstChildWhichIsA("Tool")
+                            local vRoot = v:FindFirstChild("HumanoidRootPart")
+                            root.CFrame = CFrame.new(vRoot.Position + Vector3.new(0, 10, 0))
+                            local char = GetCharacter()
+                            local tool = char and char:FindFirstChildWhichIsA("Tool")
                             if tool then tool:Activate() end
                             break
                         end
@@ -616,35 +714,35 @@ end
 local function AutoDungeonLoop()
     while Config.AutoDungeon do
         task.wait(1)
+        local root = GetRoot()
+        if not root then continue end
         pcall(function()
-            -- Find dungeon entrance
             for _, v in pairs(Workspace:GetDescendants()) do
                 if v:IsA("Model") and string.find(string.lower(v.Name), "dungeon") then
                     local click = v:FindFirstChildWhichIsA("ClickDetector")
-                    if click then
-                        HumanoidRootPart.CFrame = v:GetPivot() * CFrame.new(0, 5, 0)
+                    local prompt = v:FindFirstChildWhichIsA("ProximityPrompt")
+                    if click or prompt then
+                        root.CFrame = v:GetPivot() * CFrame.new(0, 5, 0)
                         task.wait(0.5)
-                        click:FireServer()
+                        if click then pcall(function() click:FireServer() end) end
+                        if prompt then
+                            pcall(function() prompt:InputHoldBegin() end)
+                            task.wait(0.1)
+                            pcall(function() prompt:InputHoldEnd() end)
+                        end
                         task.wait(2)
                     end
                 end
             end
-            -- Kill mobs inside
             local target = GetClosestEnemy(500)
             if target and target:FindFirstChild("HumanoidRootPart") then
-                local root = target:FindFirstChild("HumanoidRootPart")
-                HumanoidRootPart.CFrame = CFrame.new(root.Position + Vector3.new(0, 5, 0))
-                local tool = LocalPlayer.Character:FindFirstChildWhichIsA("Tool")
+                local tRoot = target:FindFirstChild("HumanoidRootPart")
+                root.CFrame = CFrame.new(tRoot.Position + Vector3.new(0, 5, 0))
+                local char = GetCharacter()
+                local tool = char and char:FindFirstChildWhichIsA("Tool")
                 if tool then tool:Activate() end
             end
         end)
-    end
-end
-
--- Movement: Infinite Jump
-local function OnJump()
-    if Config.InfiniteJump then
-        HumanoidRootPart.Velocity = Vector3.new(HumanoidRootPart.Velocity.X, 50, HumanoidRootPart.Velocity.Z)
     end
 end
 
@@ -652,67 +750,57 @@ end
 local function NoClipLoop()
     while Config.NoClip do
         task.wait(0.1)
-        pcall(function()
-            if Character then
-                for _, part in pairs(Character:GetDescendants()) do
+        local char = GetCharacter()
+        if char then
+            pcall(function()
+                for _, part in pairs(char:GetDescendants()) do
                     if part:IsA("BasePart") then
                         part.CanCollide = false
                     end
                 end
-            end
-        end)
+            end)
+        end
     end
     -- Restore collision
-    pcall(function()
-        if Character then
-            for _, part in pairs(Character:GetDescendants()) do
+    local char = GetCharacter()
+    if char then
+        pcall(function()
+            for _, part in pairs(char:GetDescendants()) do
                 if part:IsA("BasePart") then
                     part.CanCollide = true
                 end
             end
-        end
-    end)
+        end)
+    end
 end
 
 -- Movement: Speed
 local function SpeedLoop()
     while Config.SpeedEnabled do
         task.wait(0.5)
-        pcall(function()
-            if Humanoid then
-                Humanoid.WalkSpeed = Config.SpeedValue
-            end
-        end)
-    end
-    pcall(function() if Humanoid then Humanoid.WalkSpeed = 16 end end)
-end
-
--- Movement: Jump Power
-local function JumpPowerLoop()
-    while Config.JumpPowerValue > 0 do
-        task.wait(1)
-        pcall(function()
-            if Humanoid then
-                Humanoid.JumpPower = Config.JumpPowerValue
-                Humanoid.JumpHeight = Config.JumpPowerValue / 5
-            end
-        end)
-        if not Config.AutoFarm and not Config.Aimbot and not Config.FastAttack and not Config.AutoFruitFind then
-            break
+        local hum = GetHumanoid()
+        if hum then
+            pcall(function() hum.WalkSpeed = Config.SpeedValue end)
         end
-        task.wait(5)
     end
+    local hum = GetHumanoid()
+    if hum then pcall(function() hum.WalkSpeed = 16 end) end
 end
 
 -- Player: Auto Stats
+-- FIX: Tries multiple possible remote names
 local function AutoStatsLoop()
     while Config.AutoStatsEnabled do
         task.wait(3)
         pcall(function()
-            local statRemote = ReplicatedStorage:FindFirstChild("RemoteEvent") or ReplicatedStorage:FindFirstChild("RemoteFunction")
-            if statRemote then
+            local remote = FindRemote("stat") or FindRemote("point") or FindRemote("level") or FindRemote("add") or FindAnyRemote()
+            if remote then
                 local statType = Config.StatMode
-                pcall(function() statRemote:FireServer("AddStats", statType, 1) end)
+                if remote:IsA("RemoteFunction") then
+                    pcall(function() remote:InvokeServer("AddStats", statType, 1) end)
+                else
+                    pcall(function() remote:FireServer("AddStats", statType, 1) end)
+                end
             end
         end)
     end
@@ -723,26 +811,39 @@ local function AutoHakiLoop()
     while Config.AutoHaki do
         task.wait(5)
         pcall(function()
-            LocalPlayer.Character:FindFirstChild("Humanoid"):EquipTool(LocalPlayer.Backpack:FindFirstChild("ObservationHaki") or LocalPlayer.Character:FindFirstChild("ObservationHaki"))
+            -- Equip observation haki
+            local backpackHaki = LocalPlayer.Backpack:FindFirstChild("ObservationHaki")
+            local charHaki = GetCharacter() and GetCharacter():FindFirstChild("ObservationHaki")
+            local haki = backpackHaki or charHaki
+            if haki and GetHumanoid() then
+                pcall(function() GetHumanoid():EquipTool(haki) end)
+            end
             task.wait(0.5)
-            -- Activate observation haki
-            local args = {["Key"] = "ObservationHaki", ["Active"] = true}
-            local remote = ReplicatedStorage:FindFirstChild("RemoteEvent") or ReplicatedStorage:FindFirstChild("RemoteFunction")
-            if remote then pcall(function() remote:FireServer("Haki", args) end) end
+            local remote = FindRemote("haki") or FindRemote("observation") or FindAnyRemote()
+            if remote then
+                local args = {["Key"] = "ObservationHaki", ["Active"] = true}
+                if remote:IsA("RemoteFunction") then
+                    pcall(function() remote:InvokeServer("Haki", args) end)
+                else
+                    pcall(function() remote:FireServer("Haki", args) end)
+                end
+            end
         end)
     end
 end
 
 -- Player: God Mode
+-- FIX: Re-applies on every tick to handle respawns
 local function GodModeLoop()
     while Config.GodMode do
         task.wait(1)
-        pcall(function()
-            if Humanoid then
-                Humanoid.MaxHealth = 999999
-                Humanoid.Health = 999999
-            end
-        end)
+        local hum = GetHumanoid()
+        if hum then
+            pcall(function()
+                hum.MaxHealth = 999999
+                hum.Health = 999999
+            end)
+        end
     end
 end
 
@@ -750,16 +851,16 @@ end
 local function SafeModeLoop()
     while Config.SafeMode do
         task.wait(2)
-        pcall(function()
-            if Humanoid and Humanoid.Health < (Humanoid.MaxHealth * 0.3) then
-                -- Teleport to safe zone
-                HumanoidRootPart.CFrame = CFrame.new(-1180, 30, -580) -- Jungle spawn
-                -- Turn off auto farms temporarily
+        local hum = GetHumanoid()
+        local root = GetRoot()
+        if hum and root and hum.Health < (hum.MaxHealth * 0.3) then
+            pcall(function()
+                root.CFrame = CFrame.new(-1180, 30, -580)
                 Config.AutoFarm = false
                 task.wait(5)
                 Config.AutoFarm = true
-            end
-        end)
+            end)
+        end
     end
 end
 
@@ -767,28 +868,47 @@ end
 local function AutoRejoinLoop()
     while Config.AutoRejoin do
         task.wait(60)
-        pcall(function()
-            if Humanoid and Humanoid.Health <= 0 then
-                task.wait(3)
+        local hum = GetHumanoid()
+        if hum and hum.Health <= 0 then
+            task.wait(3)
+            pcall(function()
                 TeleportService:Teleport(game.PlaceId, LocalPlayer)
-            end
-        end)
+            end)
+        end
     end
 end
 
--- Feature Starter
+-- Feature Starter (runs loop in a coroutine)
 local function StartFeature(name, func)
     coroutine.wrap(func)()
 end
 
--- ========== GUI BUILDER ==========
+-- ===================== INFINITE JUMP HANDLER =====================
+-- FIX: Single connection only (was duplicated)
+UserInputService.JumpRequest:Connect(function()
+    if Config.InfiniteJump then
+        local root = GetRoot()
+        if root then
+            root.Velocity = Vector3.new(root.Velocity.X, 60, root.Velocity.Z)
+        end
+    end
+end)
+
+-- ===================== GUI BUILDER =====================
 
 local function CreateGUI()
+    -- Destroy old instance
+    pcall(function()
+        local old = LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild("MalXHubGUI")
+        if old then old:Destroy() end
+    end)
+    
+    -- FIX: Parent to PlayerGui (not CoreGui)
     local ScreenGui = Instance.new("ScreenGui")
     ScreenGui.Name = "MalXHubGUI"
     ScreenGui.ResetOnSpawn = false
     ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    ScreenGui.Parent = (CoreGui:FindFirstChild("RobloxGui") or CoreGui)
+    ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
     
     -- Main Frame
     local MainFrame = Instance.new("Frame")
@@ -829,7 +949,7 @@ local function CreateGUI()
     local TitleText = Instance.new("TextLabel")
     TitleText.Size = UDim2.new(1, 0, 1, 0)
     TitleText.BackgroundTransparency = 1
-    TitleText.Text = "⚡ MalX Hub"
+    TitleText.Text = "⚡ MalX Hub v2"
     TitleText.TextColor3 = Color3.fromRGB(170, 100, 255)
     TitleText.Font = Enum.Font.SourceSansBold
     TitleText.TextSize = 24
@@ -905,7 +1025,6 @@ local function CreateGUI()
     local categories = {}
     local currentCategory = "COMBAT"
     
-    -- Tab buttons
     local tabData = {
         {"⚔️", "COMBAT"},
         {"🍎", "FRUITS"},
@@ -937,19 +1056,17 @@ local function CreateGUI()
         
         btn.MouseButton1Click:Connect(function()
             currentCategory = data[2]
-            -- Update tab colors
             for _, tb in pairs(tabButtons) do
                 tb.BackgroundColor3 = Color3.fromRGB(30, 28, 50)
             end
             btn.BackgroundColor3 = Color3.fromRGB(120, 40, 200)
-            -- Rebuild visible content
             RebuildContent()
         end)
         
         table.insert(tabButtons, btn)
     end
     
-    -- Local function to create a separator
+    -- Local helper functions
     local function CreateSeparator(text)
         local sep = Instance.new("Frame")
         sep.Size = UDim2.new(0, 360, 0, 28)
@@ -969,7 +1086,6 @@ local function CreateGUI()
         return sep
     end
     
-    -- Local function to create a toggle
     local function CreateToggle(text, configKey, defaultState)
         local frame = Instance.new("Frame")
         frame.Size = UDim2.new(0, 360, 0, 42)
@@ -1014,36 +1130,34 @@ local function CreateGUI()
             StatusLabel.Text = string.format("[MalX] %s → %s", text, state and "ENABLED" or "DISABLED")
             StatusLabel.TextColor3 = state and Color3.fromRGB(100, 255, 130) or Color3.fromRGB(255, 150, 50)
             
-            -- Start/stop feature loops
-            if configKey == "AutoFarm" and state then StartFeature("AutoFarm", AutoFarmLoop)
-            elseif configKey == "Aimbot" and state then StartFeature("Aimbot", AimbotLoop)
-            elseif configKey == "FastAttack" and state then StartFeature("FastAttack", FastAttackLoop)
-            elseif configKey == "BringEnemy" and state then StartFeature("BringEnemy", BringEnemyLoop)
-            elseif configKey == "AutoQuest" and state then StartFeature("AutoQuest", AutoQuestLoop)
-            elseif configKey == "AutoBoss" and state then StartFeature("AutoBoss", AutoBossLoop)
-            elseif configKey == "AutoFruitFind" and state then StartFeature("AutoFruitFind", AutoFruitFindLoop)
-            elseif configKey == "FruitNotifier" and state then StartFeature("FruitNotifier", FruitNotifierLoop)
-            elseif configKey == "AutoStoreFruit" and state then StartFeature("AutoStoreFruit", AutoStoreFruitLoop)
-            elseif configKey == "PlayerESP" and state then StartFeature("PlayerESP", PlayerESPLoop)
-            elseif configKey == "NpcESP" and state then StartFeature("NpcESP", NpcESPLoop)
-            elseif configKey == "ChestESP" and state then StartFeature("ChestESP", ChestESPLoop)
-            elseif configKey == "AutoRaid" and state then StartFeature("AutoRaid", AutoRaidLoop)
-            elseif configKey == "AutoSeaEvent" and state then StartFeature("AutoSeaEvent", AutoSeaEventLoop)
-            elseif configKey == "AutoDungeon" and state then StartFeature("AutoDungeon", AutoDungeonLoop)
-            elseif configKey == "NoClip" and state then StartFeature("NoClip", NoClipLoop)
-            elseif configKey == "SpeedEnabled" and state then StartFeature("Speed", SpeedLoop)
-            elseif configKey == "AutoStatsEnabled" and state then StartFeature("AutoStats", AutoStatsLoop)
-            elseif configKey == "AutoHaki" and state then StartFeature("AutoHaki", AutoHakiLoop)
-            elseif configKey == "GodMode" and state then StartFeature("GodMode", GodModeLoop)
-            elseif configKey == "SafeMode" and state then StartFeature("SafeMode", SafeModeLoop)
-            elseif configKey == "AutoRejoin" and state then StartFeature("AutoRejoin", AutoRejoinLoop)
-            end
+            -- Start feature loops
+            if configKey == "AutoFarm" and state then StartFeature("AutoFarm", AutoFarmLoop) end
+            if configKey == "Aimbot" and state then StartFeature("Aimbot", AimbotLoop) end
+            if configKey == "FastAttack" and state then StartFeature("FastAttack", FastAttackLoop) end
+            if configKey == "BringEnemy" and state then StartFeature("BringEnemy", BringEnemyLoop) end
+            if configKey == "AutoQuest" and state then StartFeature("AutoQuest", AutoQuestLoop) end
+            if configKey == "AutoBoss" and state then StartFeature("AutoBoss", AutoBossLoop) end
+            if configKey == "AutoFruitFind" and state then StartFeature("AutoFruitFind", AutoFruitFindLoop) end
+            if configKey == "FruitNotifier" and state then StartFeature("FruitNotifier", FruitNotifierLoop) end
+            if configKey == "AutoStoreFruit" and state then StartFeature("AutoStoreFruit", AutoStoreFruitLoop) end
+            if configKey == "PlayerESP" and state then StartFeature("PlayerESP", PlayerESPLoop) end
+            if configKey == "NpcESP" and state then StartFeature("NpcESP", NpcESPLoop) end
+            if configKey == "ChestESP" and state then StartFeature("ChestESP", ChestESPLoop) end
+            if configKey == "AutoRaid" and state then StartFeature("AutoRaid", AutoRaidLoop) end
+            if configKey == "AutoSeaEvent" and state then StartFeature("AutoSeaEvent", AutoSeaEventLoop) end
+            if configKey == "AutoDungeon" and state then StartFeature("AutoDungeon", AutoDungeonLoop) end
+            if configKey == "NoClip" and state then StartFeature("NoClip", NoClipLoop) end
+            if configKey == "SpeedEnabled" and state then StartFeature("Speed", SpeedLoop) end
+            if configKey == "AutoStatsEnabled" and state then StartFeature("AutoStats", AutoStatsLoop) end
+            if configKey == "AutoHaki" and state then StartFeature("AutoHaki", AutoHakiLoop) end
+            if configKey == "GodMode" and state then StartFeature("GodMode", GodModeLoop) end
+            if configKey == "SafeMode" and state then StartFeature("SafeMode", SafeModeLoop) end
+            if configKey == "AutoRejoin" and state then StartFeature("AutoRejoin", AutoRejoinLoop) end
         end)
         
         return frame, btn
     end
     
-    -- Local function to create a dropdown-style button list
     local function CreateTeleportButton(name, cframe)
         local frame = Instance.new("Frame")
         frame.Size = UDim2.new(0, 360, 0, 34)
@@ -1077,7 +1191,7 @@ local function CreateGUI()
     
     -- Content builder per category
     function RebuildContent()
-        -- Clear scrolling frame children except status label
+        -- Clear scrolling frame children except status label and layout
         for _, child in pairs(ScrollingFrame:GetChildren()) do
             if child ~= StatusLabel and child ~= UIListLayout then
                 child:Destroy()
@@ -1113,7 +1227,6 @@ local function CreateGUI()
             CreateToggle("Auto Dungeon", "AutoDungeon", false).Parent = ScrollingFrame
             
             CreateSeparator("🌍 ISLAND TELEPORT").Parent = ScrollingFrame
-            -- Show teleport buttons (first 15 to avoid overflow)
             local count = 0
             for _, loc in ipairs(IslandLocations) do
                 if count >= 15 then break end
@@ -1124,13 +1237,10 @@ local function CreateGUI()
         elseif currentCategory == "MOVE" then
             CreateSeparator("🚀 MOVEMENT FEATURES").Parent = ScrollingFrame
             CreateToggle("Infinite Jump", "InfiniteJump", false).Parent = ScrollingFrame
-            -- Jump binding
-            if Config.InfiniteJump then
-                UserInputService.JumpRequest:Connect(OnJump)
-            end
             
             CreateToggle("No Clip", "NoClip", false).Parent = ScrollingFrame
             
+            -- Speed toggle+display
             local speedFrame = Instance.new("Frame")
             speedFrame.Size = UDim2.new(0, 360, 0, 42)
             speedFrame.BackgroundColor3 = Color3.fromRGB(20, 18, 35)
@@ -1171,7 +1281,7 @@ local function CreateGUI()
             end)
             speedFrame.Parent = ScrollingFrame
             
-            -- Jump Power slider-like (simple up/down)
+            -- Jump Power display
             local jumpFrame = Instance.new("Frame")
             jumpFrame.Size = UDim2.new(0, 360, 0, 34)
             jumpFrame.BackgroundColor3 = Color3.fromRGB(20, 18, 35)
@@ -1188,7 +1298,6 @@ local function CreateGUI()
             jumpLabel.Font = Enum.Font.SourceSansSemibold
             jumpLabel.TextSize = 15
             jumpLabel.Parent = jumpFrame
-            
             jumpFrame.Parent = ScrollingFrame
             
             -- Jump controls
@@ -1211,7 +1320,8 @@ local function CreateGUI()
             jDownCorner.Parent = jDown
             jDown.MouseButton1Click:Connect(function()
                 Config.JumpPowerValue = math.max(50, Config.JumpPowerValue - 10)
-                Humanoid.JumpPower = Config.JumpPowerValue
+                local hum = GetHumanoid()
+                if hum then hum.JumpPower = Config.JumpPowerValue end
                 jumpLabel.Text = "Jump Power: " .. Config.JumpPowerValue
             end)
             
@@ -1229,7 +1339,8 @@ local function CreateGUI()
             jUpCorner.Parent = jUp
             jUp.MouseButton1Click:Connect(function()
                 Config.JumpPowerValue = math.min(500, Config.JumpPowerValue + 10)
-                Humanoid.JumpPower = Config.JumpPowerValue
+                local hum = GetHumanoid()
+                if hum then hum.JumpPower = Config.JumpPowerValue end
                 jumpLabel.Text = "Jump Power: " .. Config.JumpPowerValue
             end)
             
@@ -1316,9 +1427,9 @@ local function CreateGUI()
             refreshBtnCorner.CornerRadius = UDim.new(0, 5)
             refreshBtnCorner.Parent = refreshBtn
             refreshBtn.MouseButton1Click:Connect(function()
-                Humanoid.Health = 0
-                task.wait(2)
-                StatusLabel.Text = "[MalX] Character respawned"
+                local hum = GetHumanoid()
+                if hum then hum.Health = 0 end
+                StatusLabel.Text = "[MalX] Respawning character..."
                 StatusLabel.TextColor3 = Color3.fromRGB(100, 200, 255)
             end)
             refreshFrame.Parent = ScrollingFrame
@@ -1352,7 +1463,7 @@ local function CreateGUI()
             clearFrame.Parent = ScrollingFrame
             
             -- Credits
-            CreateSeparator("™️ MALX HUB").Parent = ScrollingFrame
+            CreateSeparator("™️ MALX HUB v2").Parent = ScrollingFrame
             local creditFrame = Instance.new("Frame")
             creditFrame.Size = UDim2.new(0, 360, 0, 50)
             creditFrame.BackgroundColor3 = Color3.fromRGB(15, 13, 28)
@@ -1365,7 +1476,7 @@ local function CreateGUI()
             creditText.Size = UDim2.new(1, 0, 0, 20)
             creditText.Position = UDim2.new(0, 0, 0, 5)
             creditText.BackgroundTransparency = 1
-            creditText.Text = "⚡ MalX Hub "
+            creditText.Text = "⚡ MalX Hub v2 | Rewritten"
             creditText.TextColor3 = Color3.fromRGB(150, 80, 220)
             creditText.Font = Enum.Font.SourceSansBold
             creditText.TextSize = 16
@@ -1375,12 +1486,11 @@ local function CreateGUI()
             creditSub.Size = UDim2.new(1, 0, 0, 18)
             creditSub.Position = UDim2.new(0, 0, 0, 28)
             creditSub.BackgroundTransparency = 1
-            creditSub.Text = "25+ Features | Keyless | 2026"
+            creditSub.Text = "25+ Features | Stable | Respawn-safe"
             creditSub.TextColor3 = Color3.fromRGB(100, 100, 130)
             creditSub.Font = Enum.Font.SourceSans
             creditSub.TextSize = 13
             creditSub.Parent = creditFrame
-            
             creditFrame.Parent = ScrollingFrame
         end
         
@@ -1399,59 +1509,86 @@ local function CreateGUI()
         MinBtn.Text = minimized and "+" or "-"
     end)
     
-    -- Destroy old instance
-    pcall(function()
-        if CoreGui:FindFirstChild("MalXHubGUI") then
-            CoreGui:FindFirstChild("MalXHubGUI"):Destroy()
-        end
-    end)
-    
     -- Build initial content
     RebuildContent()
     
     return ScreenGui
 end
 
--- ========== LAUNCH ==========
+-- ===================== LAUNCH =====================
 
--- Infinite Jump handler
-UserInputService.JumpRequest:Connect(function()
-    if Config.InfiniteJump then
-        HumanoidRootPart.Velocity = Vector3.new(HumanoidRootPart.Velocity.X, 60, HumanoidRootPart.Velocity.Z)
+-- Create the GUI
+CreateGUI()
+
+-- ===================== TOGGLE KEY SYSTEM =====================
+-- FIX: Multiple key binding methods for compatibility
+
+-- Method 1: Insert key via UserInputService
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.Insert then
+        local gui = LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild("MalXHubGUI")
+        if gui then gui.Enabled = not gui.Enabled end
     end
 end)
 
-CreateGUI()
+-- Method 2: RightShift fallback (less likely to be intercepted)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        local gui = LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild("MalXHubGUI")
+        if gui then gui.Enabled = not gui.Enabled end
+    end
+end)
 
--- Load notification
-LocalPlayer:WaitForChild("PlayerGui")
+-- Method 3: Chat command "/malx" or ".malx"
+-- FIX: Uses a safer approach via Chat service
+local function SetupChatToggle()
+    local success, chatService = pcall(function()
+        return ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+    end)
+    if success and chatService then
+        local msgEvent = chatService:FindFirstChild("OnMessageDoneFiltering")
+        if msgEvent then
+            msgEvent.OnClientEvent:Connect(function(messageData)
+                local msg = messageData.Message and messageData.Message:lower() or ""
+                if msg == "/malx" or msg == ".malx" or msg == "/toggle" or msg == ".toggle" then
+                    local gui = LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild("MalXHubGUI")
+                    if gui then gui.Enabled = not gui.Enabled end
+                end
+            end)
+        end
+    end
+end
+pcall(SetupChatToggle)
+
+-- Method 4: F4 key as another fallback
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.F4 then
+        local gui = LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild("MalXHubGUI")
+        if gui then gui.Enabled = not gui.Enabled end
+    end
+end)
+
+-- ===================== NOTIFICATION =====================
+-- FIX: Shorter duration, cleaner text
 local notify = Instance.new("ScreenGui")
 local notifyText = Instance.new("TextLabel")
 notify.Name = "MalXLoadNotify"
-notify.Parent = LocalPlayer.PlayerGui
+notify.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
 notifyText.Size = UDim2.new(0, 420, 0, 45)
 notifyText.Position = UDim2.new(0.5, -210, 0.25, 0)
 notifyText.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 notifyText.BackgroundTransparency = 0.25
 notifyText.TextColor3 = Color3.fromRGB(170, 100, 255)
-notifyText.Text = "⚡ MalX Hub Loaded! Press Insert to toggle GUI"
+notifyText.Text = "⚡ MalX Hub v2 loaded! Press Insert, RightShift, or F4 to toggle GUI"
 notifyText.Font = Enum.Font.SourceSansBold
-notifyText.TextSize = 20
+notifyText.TextSize = 18
 notifyText.TextStrokeTransparency = 0
 notifyText.Parent = notify
 
 task.delay(5, function()
     pcall(function() notify:Destroy() end)
-end)
-
--- Insert key to toggle GUI
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    if input.KeyCode == Enum.KeyCode.Insert then
-        local gui = CoreGui:FindFirstChild("MalXHubGUI")
-        if gui then
-            gui.Enabled = not gui.Enabled
-        end
-    end
 end)
