@@ -1,5 +1,5 @@
 --[[
-  MalX Hub v2 — REWRITTEN
+  MalX Hub v2 — 
   Fixes: GUI visibility, character respawns, key binds, remote detection, stability
 ]]
 
