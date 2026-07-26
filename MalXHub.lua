@@ -1,5 +1,5 @@
 --[[
-  MalX Hub v2 - Blox Fruit Script
+  MalX Hub - Blox Fruit Script
   Categories: COMBAT | FRUITS | VISUAL | WORLD | MOVEMENT | PLAYER | UTILITY
   Features: 25+ toggles and controls
 ]]
@@ -829,7 +829,7 @@ local function CreateGUI()
     local TitleText = Instance.new("TextLabel")
     TitleText.Size = UDim2.new(1, 0, 1, 0)
     TitleText.BackgroundTransparency = 1
-    TitleText.Text = "⚡ MalX Hub v2"
+    TitleText.Text = "⚡ MalX Hub"
     TitleText.TextColor3 = Color3.fromRGB(170, 100, 255)
     TitleText.Font = Enum.Font.SourceSansBold
     TitleText.TextSize = 24
@@ -1352,7 +1352,7 @@ local function CreateGUI()
             clearFrame.Parent = ScrollingFrame
             
             -- Credits
-            CreateSeparator("™️ MALX HUB v2").Parent = ScrollingFrame
+            CreateSeparator("™️ MALX HUB").Parent = ScrollingFrame
             local creditFrame = Instance.new("Frame")
             creditFrame.Size = UDim2.new(0, 360, 0, 50)
             creditFrame.BackgroundColor3 = Color3.fromRGB(15, 13, 28)
@@ -1365,7 +1365,7 @@ local function CreateGUI()
             creditText.Size = UDim2.new(1, 0, 0, 20)
             creditText.Position = UDim2.new(0, 0, 0, 5)
             creditText.BackgroundTransparency = 1
-            creditText.Text = "⚡ MalX Hub v2 | Solara Compatible"
+            creditText.Text = "⚡ MalX Hub "
             creditText.TextColor3 = Color3.fromRGB(150, 80, 220)
             creditText.Font = Enum.Font.SourceSansBold
             creditText.TextSize = 16
@@ -1435,7 +1435,7 @@ notifyText.Position = UDim2.new(0.5, -210, 0.25, 0)
 notifyText.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 notifyText.BackgroundTransparency = 0.25
 notifyText.TextColor3 = Color3.fromRGB(170, 100, 255)
-notifyText.Text = "⚡ MalX Hub v2 Loaded! Press Insert to toggle GUI"
+notifyText.Text = "⚡ MalX Hub Loaded! Press Insert to toggle GUI"
 notifyText.Font = Enum.Font.SourceSansBold
 notifyText.TextSize = 20
 notifyText.TextStrokeTransparency = 0
