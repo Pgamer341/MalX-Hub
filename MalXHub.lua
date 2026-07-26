@@ -1,9 +1,9 @@
 --[[
-  MalX Hub v2 — ULTIMATE FIX
-  - Auto-opens with 4 fallback parenting methods
-  - Clickable corner icon (⚡ MalX) to toggle main GUI
-  - NO 'continue' keyword (executor-safe)
-  - All loops are simple while-true with config checks
+  MalX Hub v2 — COMBAT FIXED
+  - Reads quest from PlayerGui to target correct enemies
+  - Searches Workspace.Enemies folder
+  - Proper tool equip + attack via VirtualUser
+  - Working auto quest NPC interaction
 ]]
 
 -- Services
@@ -14,24 +14,23 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local VirtualUser = game:GetService("VirtualUser")
 local TeleportService = game:GetService("TeleportService")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
--- ========= SAFE CHARACTER REFS =========
+-- ========= CHARACTER REFS =========
 local function GetRoot()
     local c = LocalPlayer.Character
-    if c then return c:FindFirstChild("HumanoidRootPart") end
-    return nil
+    return c and c:FindFirstChild("HumanoidRootPart")
 end
 local function GetHum()
     local c = LocalPlayer.Character
-    if c then return c:FindFirstChild("Humanoid") end
-    return nil
+    return c and c:FindFirstChild("Humanoid")
 end
 
--- ========= ANTI-IDLE =========
+-- Anti-idle
 LocalPlayer.Idled:Connect(function()
     VirtualInputManager:SendKeyEvent(true, "V", false, game)
     task.wait(0.5)
@@ -40,11 +39,9 @@ end)
 
 -- ========= CONFIG =========
 local Config = {
-    AimbotRange = 2000,
     SpeedValue = 50,
     JumpPowerValue = 100,
     StatMode = "Melee",
-    -- toggles
     AutoFarm = false, Aimbot = false, AutoSkills = false, FastAttack = false,
     BringEnemy = false, AutoQuest = false, AutoBoss = false,
     AutoFruitFind = false, FruitNotifier = false, AutoStoreFruit = false,
@@ -53,6 +50,9 @@ local Config = {
     InfiniteJump = false, NoClip = false, SpeedEnabled = false,
     AutoStatsEnabled = false, AutoHaki = false, GodMode = false,
     SafeMode = false, AutoRejoin = false,
+    SelectedWeapon = nil,
+    -- Combat tracking
+    CurrentQuestTarget = nil, -- auto-detected from quest GUI
 }
 
 -- ========= FRUIT LIST =========
@@ -62,136 +62,323 @@ local function IsFruit(obj)
     if not obj then return false end
     local n = obj.Name:lower()
     for i = 1, #FruitNames do
-        if n:find(FruitNames[i]:lower()) then
-            return true
-        end
+        if n:find(FruitNames[i]:lower()) then return true end
     end
-    if obj:FindFirstChild("Fruit") or obj:FindFirstChild("ClickDetector") then
-        return true
-    end
-    return false
+    return (obj:FindFirstChild("Fruit") or obj:FindFirstChild("ClickDetector")) and true or false
 end
 
--- ========= TELEPORT =========
 local function Tp(cf)
     local r = GetRoot()
     if r then r.CFrame = cf end
 end
 
--- ========= BUILD GUI =========
+-- ========= QUEST SYSTEM =========
 
--- Kill any leftover GUIs first
+-- Blox Fruit quest GUI: LocalPlayer.PlayerGui.Main.Quest.Container.QuestTitle.Title.Text
+-- Example: "Defeat Gorilla (0/10)"
+local function GetQuestInfo()
+    local ok, result = pcall(function()
+        local questFrame = PlayerGui:FindFirstChild("Main")
+        if not questFrame then return nil end
+        questFrame = questFrame:FindFirstChild("Quest")
+        if not questFrame then return nil end
+        local container = questFrame:FindFirstChild("Container")
+        if not container then return nil end
+        local title = container:FindFirstChild("QuestTitle")
+        if not title then return nil end
+        local textLabel = title:FindFirstChild("Title")
+        if not textLabel then return nil end
+        return textLabel.Text
+    end)
+    if ok and result then return result end
+    return nil
+end
+
+-- Extract enemy name from quest text
+-- "Defeat Gorilla (0/10)" → "Gorilla"
+-- "Defeat Pirate (0/5)" → "Pirate"
+local function ExtractEnemyNameFromQuest(questText)
+    if not questText then return nil end
+    -- Pattern: "Defeat <EnemyName> (X/Y)"
+    local startIdx, endIdx = questText:find("Defeat ")
+    if not startIdx then return nil end
+    local afterDefeat = questText:sub(endIdx + 1)
+    local parenIdx = afterDefeat:find(" %(")
+    if parenIdx then
+        return afterDefeat:sub(1, parenIdx - 1)
+    end
+    return afterDefeat:gsub(" %(.+%)", ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+-- Full enemy name with level bracket
+-- e.g. "Gorilla" → check all "Gorilla [Lv. 20]" etc.
+local function GetFullEnemyName(baseName)
+    if not baseName then return nil end
+    -- Check Workspace.Enemies first
+    local enemies = Workspace:FindFirstChild("Enemies")
+    if enemies then
+        for _, v in pairs(enemies:GetChildren()) do
+            if v:IsA("Model") then
+                -- Match: v.Name starts with baseName
+                local enemyBase = v.Name:gsub(" %[Lv%. %d+%]", "")
+                if enemyBase == baseName then
+                    return v.Name
+                end
+            end
+        end
+    end
+    -- Check ReplicatedStorage for spawned enemy models
+    for _, v in pairs(ReplicatedStorage:GetChildren()) do
+        if v:IsA("Model") then
+            local enemyBase = v.Name:gsub(" %[Lv%. %d+%]", "")
+            if enemyBase == baseName then
+                return v.Name
+            end
+        end
+    end
+    return nil
+end
+
+-- Get a live enemy target matching the quest
+local function GetQuestTarget()
+    local questText = GetQuestInfo()
+    if not questText then return nil end
+    local baseName = ExtractEnemyNameFromQuest(questText)
+    if not baseName then return nil end
+    
+    -- Search in Workspace.Enemies
+    local enemies = Workspace:FindFirstChild("Enemies")
+    if not enemies then return nil end
+    
+    local closest, closestDist = nil, math.huge
+    local root = GetRoot()
+    if not root then return nil end
+    
+    for _, v in pairs(enemies:GetChildren()) do
+        if v:IsA("Model") then
+            local enemyBase = v.Name:gsub(" %[Lv%. %d+%]", "")
+            if enemyBase == baseName then
+                local hum = v:FindFirstChild("Humanoid")
+                local hrp = v:FindFirstChild("HumanoidRootPart")
+                if hum and hrp and hum.Health > 0 then
+                    local dist = (hrp.Position - root.Position).Magnitude
+                    if dist < closestDist then
+                        closest = v
+                        closestDist = dist
+                    end
+                end
+            end
+        end
+    end
+    return closest
+end
+
+-- Get any enemy (fallback if no quest or quest target not found)
+local function GetAnyEnemy(range)
+    local root = GetRoot()
+    if not root then return nil end
+    local enemies = Workspace:FindFirstChild("Enemies")
+    if not enemies then return nil end
+    local closest, closestDist = nil, math.huge
+    for _, v in pairs(enemies:GetChildren()) do
+        if v:IsA("Model") then
+            local hum = v:FindFirstChild("Humanoid")
+            local hrp = v:FindFirstChild("HumanoidRootPart")
+            if hum and hrp and hum.Health > 0 and not Players:GetPlayerFromCharacter(v) then
+                local dist = (hrp.Position - root.Position).Magnitude
+                if dist < closestDist and dist <= range then
+                    closest = v
+                    closestDist = dist
+                end
+            end
+        end
+    end
+    return closest
+end
+
+-- ========= QUEST NPC DATA =========
+-- FIX: Proper NPC CFrame locations for accepting quests
+local QuestNPCs = {
+    -- First Sea
+    {Name = "Bandit", Level = 1, NPC_CF = CFrame.new(1061, 16, 1549), QuestName = "BanditQuest1"},
+    {Name = "Monkey", Level = 10, NPC_CF = CFrame.new(-1604, 37, 154), QuestName = "JungleQuest"},
+    {Name = "Gorilla", Level = 20, NPC_CF = CFrame.new(-1120, 15, 384), QuestName = "JungleQuest"},
+    {Name = "Pirate", Level = 30, NPC_CF = CFrame.new(-1265, 30, -684), QuestName = "BuggyQuest1"},
+    {Name = "Brute", Level = 40, NPC_CF = CFrame.new(-1265, 30, -684), QuestName = "BuggyQuest1"},
+    {Name = "Desert Bandit", Level = 60, NPC_CF = CFrame.new(958, 17, 6), QuestName = "DesertQuest"},
+    {Name = "Desert Officer", Level = 70, NPC_CF = CFrame.new(958, 17, 6), QuestName = "DesertQuest"},
+    {Name = "Snow Bandit", Level = 90, NPC_CF = CFrame.new(1247, 47, -1594), QuestName = "SnowQuest"},
+    {Name = "Snowman", Level = 100, NPC_CF = CFrame.new(1247, 47, -1594), QuestName = "SnowQuest"},
+    {Name = "Chief Petty Officer", Level = 120, NPC_CF = CFrame.new(-4765, 28, -3183), QuestName = "MarineQuest2"},
+    {Name = "Sky Bandit", Level = 150, NPC_CF = CFrame.new(-4970, 296, -2176), QuestName = "SkyQuest"},
+    {Name = "Toga Warrior", Level = 225, NPC_CF = CFrame.new(-5330, 422, -2630), QuestName = "SkyQuest"},
+}
+
+-- Find the right quest NPC based on player level
+local function GetQuestNPCForLevel(level)
+    local best = nil
+    for i = 1, #QuestNPCs do
+        local q = QuestNPCs[i]
+        if level >= q.Level then
+            if not best or q.Level > best.Level then
+                best = q
+            end
+        end
+    end
+    return best
+end
+
+-- ========= TOOL/EQUIP SYSTEM =========
+
+-- Get the best tool from backpack
+local function GetBestTool()
+    -- Priority: equipped weapon > strongest weapon in backpack
+    local char = LocalPlayer.Character
+    if char then
+        local equipped = char:FindFirstChildWhichIsA("Tool")
+        if equipped then return equipped end
+    end
+    -- Get from backpack
+    local bp = LocalPlayer.Backpack
+    -- Prefer swords/melee, avoid guns if close range
+    for _, v in pairs(bp:GetChildren()) do
+        if v:IsA("Tool") then
+            return v
+        end
+    end
+    return nil
+end
+
+local function EquipTool(tool)
+    if not tool then return end
+    local hum = GetHum()
+    if hum then
+        pcall(function() hum:EquipTool(tool) end)
+    end
+end
+
+-- ========= ATTACK SYSTEM =========
+local function DoAttack()
+    -- Method 1: VirtualUser click (works on most executors)
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton1(Vector2.new(0, 0))
+    end)
+    
+    -- Method 2: Activate equipped tool
+    pcall(function()
+        local char = LocalPlayer.Character
+        if char then
+            local tool = char:FindFirstChildWhichIsA("Tool")
+            if tool then
+                tool:Activate()
+                -- Try remote events in the tool
+                for _, r in pairs(tool:GetDescendants()) do
+                    if r:IsA("RemoteEvent") then
+                        pcall(function() r:FireServer("Activate") end)
+                    end
+                end
+            end
+        end
+    end)
+    
+    -- Method 3: Click on screen center
+    pcall(function()
+        VirtualInputManager:SendMouseButtonEvent(500, 300, 0, true, game, 1)
+        task.wait(0.02)
+        VirtualInputManager:SendMouseButtonEvent(500, 300, 0, false, game, 1)
+    end)
+end
+
+-- Use skills (Z, X, C, V, F, etc.)
+local function UseSkills()
+    if not Config.AutoSkills then return end
+    local keys = {"Z", "X", "C", "V", "F", "G"}
+    for i = 1, #keys do
+        local key = keys[i]
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true, key, false, game)
+            task.wait(0.05)
+            VirtualInputManager:SendKeyEvent(false, key, false, game)
+            task.wait(0.25)
+        end)
+    end
+end
+
+-- ========= AUTO QUEST =========
+local function DoAutoQuest()
+    local level = LocalPlayer.Data.Level.Value
+    local questInfo = GetQuestInfo()
+    
+    -- Check if we already have a quest
+    if questInfo then
+        -- We have a quest, check if completed
+        -- Format: "Defeat X (current/total)"
+        local current, total = questInfo:match("%((%d+)/(%d+)%)")
+        if current and total then
+            local cur = tonumber(current)
+            local tot = tonumber(total)
+            if cur and tot and cur >= tot then
+                -- Quest completed! Go talk to NPC to turn in / get new
+                local npc = GetQuestNPCForLevel(level)
+                if npc then
+                    Tp(npc.NPC_CF * CFrame.new(0, 5, 3))
+                    task.wait(1)
+                    -- Click detector or proximity prompt
+                    pcall(function()
+                        local npcModel = Workspace:FindFirstChild(npc.QuestName)
+                        if npcModel then
+                            local cd = npcModel:FindFirstChildWhichIsA("ClickDetector")
+                            if cd then cd:FireServer() end
+                        end
+                    end)
+                    task.wait(1)
+                end
+                return
+            end
+        end
+        -- Quest is active and not complete, farm it
+        return
+    end
+    
+    -- No active quest, go get one
+    local npc = GetQuestNPCForLevel(level)
+    if npc then
+        Tp(npc.NPC_CF * CFrame.new(0, 5, 3))
+        task.wait(1.5)
+        -- Find and interact with the NPC
+        pcall(function()
+            local npcModel = Workspace:FindFirstChild(npc.QuestName)
+            if npcModel then
+                local cd = npcModel:FindFirstChildWhichIsA("ClickDetector")
+                if cd then
+                    cd:FireServer()
+                end
+            end
+        end)
+        task.wait(1)
+    end
+end
+
+-- ========= BUILD GUI ========= (same as before, keep it simple)
+
+-- Kill leftovers
 pcall(function()
     local g1 = PlayerGui:FindFirstChild("MalXHubGUI")
     if g1 then g1:Destroy() end
     local g2 = PlayerGui:FindFirstChild("MalXCornerIcon")
     if g2 then g2:Destroy() end
-    local g3 = CoreGui:FindFirstChild("MalXHubGUI")
+    local g3 = PlayerGui:FindFirstChild("MalXLoadNotify")
     if g3 then g3:Destroy() end
-    local g4 = CoreGui:FindFirstChild("MalXCornerIcon")
-    if g4 then g4:Destroy() end
 end)
 
--- CLIENT SCREEN
-local cl = Instance.new("ScreenGui")
-cl.Name = "MalXLoadNotify"
-cl.ResetOnSpawn = false
-cl.Parent = PlayerGui
+-- Main GUI
+local gui = Instance.new("ScreenGui")
+gui.Name = "MalXHubGUI"
+gui.ResetOnSpawn = false
+gui.Enabled = true
+gui.Parent = PlayerGui
 
-local clT = Instance.new("TextLabel")
-clT.Size = UDim2.new(0, 400, 0, 40)
-clT.Position = UDim2.new(0.5, -200, 0.2, 0)
-clT.BackgroundColor3 = Color3.fromRGB(0,0,0)
-clT.BackgroundTransparency = 0.2
-clT.TextColor3 = Color3.fromRGB(170,100,255)
-clT.Text = "⚡ Loading MalX Hub v2..."
-clT.Font = Enum.Font.SourceSansBold
-clT.TextSize = 18
-clT.TextStrokeTransparency = 0
-clT.Parent = cl
-Instance.new("UICorner", clT).CornerRadius = UDim.new(0,8)
-
--- ===== TRY 4 PARENTING LOCATIONS =====
-local gui = nil
-local parentingAttempts = {
-    PlayerGui,
-    CoreGui,
-    CoreGui:FindFirstChild("RobloxGui"),
-    CoreGui:FindFirstChild("RobloxGui") or CoreGui
-}
-
-for i = 1, #parentingAttempts do
-    local parent = parentingAttempts[i]
-    if parent then
-        local success = pcall(function()
-            local test = Instance.new("ScreenGui")
-            test.Name = "MalXHubGUI"
-            test.ResetOnSpawn = false
-            test.Enabled = true
-            local f = Instance.new("Frame")
-            f.Size = UDim2.new(0, 10, 0, 10)
-            f.Parent = test
-            test.Parent = parent
-            task.wait(0.05)
-            if test.Parent ~= nil then
-                gui = test
-                f:Destroy()
-                error("FOUND") -- break out of pcall via error
-            else
-                test:Destroy()
-            end
-        end)
-        if success == false and gui ~= nil then
-            -- Found working parent
-            break
-        end
-    end
-end
-
--- If all failed, force into PlayerGui
-if gui == nil then
-    gui = Instance.new("ScreenGui")
-    gui.Name = "MalXHubGUI"
-    gui.ResetOnSpawn = false
-    gui.Enabled = true
-    gui.Parent = PlayerGui
-end
-
--- ===== CORNER ICON GUI =====
-local iconGui = nil
-for i = 1, #parentingAttempts do
-    local parent = parentingAttempts[i]
-    if parent then
-        local ok = pcall(function()
-            local t = Instance.new("ScreenGui")
-            t.Name = "MalXCornerIcon"
-            t.ResetOnSpawn = false
-            t.Enabled = true
-            local f = Instance.new("Frame")
-            f.Size = UDim2.new(0, 10, 0, 10)
-            f.Parent = t
-            t.Parent = parent
-            task.wait(0.05)
-            if t.Parent ~= nil then
-                iconGui = t
-                f:Destroy()
-                error("FOUND")
-            else
-                t:Destroy()
-            end
-        end)
-        if ok == false and iconGui ~= nil then break end
-    end
-end
-if iconGui == nil then
-    iconGui = Instance.new("ScreenGui")
-    iconGui.Name = "MalXCornerIcon"
-    iconGui.ResetOnSpawn = false
-    iconGui.Enabled = true
-    iconGui.Parent = PlayerGui
-end
-
--- ===== BUILD MAIN GUI =====
 local main = Instance.new("Frame")
 main.Size = UDim2.new(0, 360, 0, 500)
 main.Position = UDim2.new(0.15, 0, 0.2, 0)
@@ -255,7 +442,6 @@ local tabs = {{"⚔️","COMBAT"},{"🍎","FRUITS"},{"👁️","VISUAL"},{"🌍"
 local tabBtns = {}
 local currentTab = "COMBAT"
 
--- Scroll frame
 local sf = Instance.new("ScrollingFrame")
 sf.Size = UDim2.new(1, -10, 1, -82)
 sf.Position = UDim2.new(0, 5, 0, 76)
@@ -280,7 +466,7 @@ status.Font = Enum.Font.SourceSansBold
 status.TextSize = 15
 status.Parent = sf
 
--- Helper: separator
+-- Helper functions
 local function Sep(txt)
     local f = Instance.new("Frame")
     f.Size = UDim2.new(0, 340, 0, 26)
@@ -298,7 +484,6 @@ local function Sep(txt)
     return f
 end
 
--- Helper: toggle
 local function Toggle(txt, key, def)
     local state = def or false
     Config[key] = state
@@ -338,7 +523,6 @@ local function Toggle(txt, key, def)
     return f
 end
 
--- Helper: teleport button
 local function TpBtn(name, cf)
     local f = Instance.new("Frame")
     f.Size = UDim2.new(0, 340, 0, 30)
@@ -359,27 +543,20 @@ local function TpBtn(name, cf)
     return f
 end
 
--- Rebuild content
-local function Rebuild()
-    -- Clear children except status and layout
+function Rebuild()
     local toRemove = {}
     for _, c in pairs(sf:GetChildren()) do
-        if c ~= status and c ~= layout then
-            table.insert(toRemove, c)
-        end
+        if c ~= status and c ~= layout then table.insert(toRemove, c) end
     end
-    for i = 1, #toRemove do
-        toRemove[i]:Destroy()
-    end
+    for i = 1, #toRemove do toRemove[i]:Destroy() end
     
     if currentTab == "COMBAT" then
         Sep("⚔️ COMBAT").Parent = sf
         Toggle("Auto Farm", "AutoFarm").Parent = sf
-        Toggle("Aimbot", "Aimbot").Parent = sf
-        Toggle("Auto Skills (1-6)", "AutoSkills").Parent = sf
+        Toggle("Auto Quest", "AutoQuest").Parent = sf
+        Toggle("Auto Skills (Z/X/C/V/F)", "AutoSkills").Parent = sf
         Toggle("Fast Attack", "FastAttack").Parent = sf
         Toggle("Bring Enemy", "BringEnemy").Parent = sf
-        Toggle("Auto Quest", "AutoQuest").Parent = sf
         Toggle("Auto Boss", "AutoBoss").Parent = sf
     elseif currentTab == "FRUITS" then
         Sep("🍎 FRUITS").Parent = sf
@@ -414,16 +591,13 @@ local function Rebuild()
             {"Kitsune Island", CFrame.new(420,30,14000)},
         }
         for i = 1, #islands do
-            if i <= 14 then
-                TpBtn(islands[i][1], islands[i][2]).Parent = sf
-            end
+            if i <= 14 then TpBtn(islands[i][1], islands[i][2]).Parent = sf end
         end
     elseif currentTab == "MOVE" then
         Sep("🚀 MOVEMENT").Parent = sf
         Toggle("Infinite Jump", "InfiniteJump").Parent = sf
         Toggle("No Clip", "NoClip").Parent = sf
         
-        -- Speed
         local spF = Instance.new("Frame")
         spF.Size = UDim2.new(0,340,0,36)
         spF.BackgroundColor3 = Color3.fromRGB(20,18,35)
@@ -458,7 +632,6 @@ local function Rebuild()
             spT.Text = Config.SpeedEnabled and "ON" or "OFF"
         end)
         
-        -- Jump power display
         local jF = Instance.new("Frame")
         jF.Size = UDim2.new(0,340,0,30)
         jF.BackgroundColor3 = Color3.fromRGB(20,18,35)
@@ -475,7 +648,6 @@ local function Rebuild()
         jL.TextSize = 14
         jL.Parent = jF
         
-        -- Jump controls
         local jcF = Instance.new("Frame")
         jcF.Size = UDim2.new(0,340,0,30)
         jcF.BackgroundTransparency = 1
@@ -491,6 +663,13 @@ local function Rebuild()
         jD.Font = Enum.Font.SourceSansBold
         jD.Parent = jcF
         Instance.new("UICorner",jD).CornerRadius = UDim.new(0,4)
+        local h = GetHum()
+        jD.MouseButton1Click:Connect(function()
+            Config.JumpPowerValue = math.max(50, Config.JumpPowerValue - 10)
+            local hum = GetHum()
+            if hum then hum.JumpPower = Config.JumpPowerValue end
+            jL.Text = "Jump Power: "..Config.JumpPowerValue
+        end)
         
         local jU = Instance.new("TextButton")
         jU.Size = UDim2.new(0,165,0,26)
@@ -502,17 +681,10 @@ local function Rebuild()
         jU.Font = Enum.Font.SourceSansBold
         jU.Parent = jcF
         Instance.new("UICorner",jU).CornerRadius = UDim.new(0,4)
-        
-        jD.MouseButton1Click:Connect(function()
-            Config.JumpPowerValue = math.max(50, Config.JumpPowerValue - 10)
-            local h = GetHum()
-            if h then h.JumpPower = Config.JumpPowerValue end
-            jL.Text = "Jump Power: "..Config.JumpPowerValue
-        end)
         jU.MouseButton1Click:Connect(function()
             Config.JumpPowerValue = math.min(500, Config.JumpPowerValue + 10)
-            local h = GetHum()
-            if h then h.JumpPower = Config.JumpPowerValue end
+            local hum = GetHum()
+            if hum then hum.JumpPower = Config.JumpPowerValue end
             jL.Text = "Jump Power: "..Config.JumpPowerValue
         end)
         
@@ -520,7 +692,6 @@ local function Rebuild()
         Sep("💪 PLAYER").Parent = sf
         Toggle("Auto Stats", "AutoStatsEnabled").Parent = sf
         
-        -- Stat mode selector
         local stF = Instance.new("Frame")
         stF.Size = UDim2.new(0,340,0,32)
         stF.BackgroundColor3 = Color3.fromRGB(20,18,35)
@@ -555,9 +726,7 @@ local function Rebuild()
             mb.MouseButton1Click:Connect(function()
                 Config.StatMode = m
                 for _, c in pairs(stF:GetChildren()) do
-                    if c:IsA("TextButton") then
-                        c.BackgroundColor3 = Color3.fromRGB(40,38,55)
-                    end
+                    if c:IsA("TextButton") then c.BackgroundColor3 = Color3.fromRGB(40,38,55) end
                 end
                 mb.BackgroundColor3 = Color3.fromRGB(120,40,200)
             end)
@@ -570,10 +739,8 @@ local function Rebuild()
         Sep("⚙️ UTILITY").Parent = sf
         Toggle("Safe Mode", "SafeMode").Parent = sf
         Toggle("Auto Rejoin", "AutoRejoin").Parent = sf
-        
         Sep("🛠️ ACTIONS").Parent = sf
         
-        -- Respawn
         local rF = Instance.new("Frame")
         rF.Size = UDim2.new(0,340,0,30)
         rF.BackgroundColor3 = Color3.fromRGB(20,18,35)
@@ -596,7 +763,6 @@ local function Rebuild()
             if h then h.Health = 0 end
         end)
         
-        -- Credits
         Sep("™️ MALX HUB v2").Parent = sf
         local cF = Instance.new("Frame")
         cF.Size = UDim2.new(0,340,0,40)
@@ -604,7 +770,6 @@ local function Rebuild()
         cF.BorderSizePixel = 0
         Instance.new("UICorner",cF).CornerRadius = UDim.new(0,5)
         cF.Parent = sf
-        
         local cT = Instance.new("TextLabel")
         cT.Size = UDim2.new(1,0,0,20)
         cT.Position = UDim2.new(0,0,0,4)
@@ -614,12 +779,11 @@ local function Rebuild()
         cT.Font = Enum.Font.SourceSansBold
         cT.TextSize = 16
         cT.Parent = cF
-        
         local cS = Instance.new("TextLabel")
         cS.Size = UDim2.new(1,0,0,14)
         cS.Position = UDim2.new(0,0,0,24)
         cS.BackgroundTransparency = 1
-        cS.Text = "25+ Features | Auto-open | Corner Icon"
+        cS.Text = "25+ Features | Fixed Combat + Quest"
         cS.TextColor3 = Color3.fromRGB(100,100,130)
         cS.Font = Enum.Font.SourceSans
         cS.TextSize = 12
@@ -627,22 +791,17 @@ local function Rebuild()
     end
     
     task.wait(0.05)
-    local contentSize = layout.AbsoluteContentSize.Y
-    sf.CanvasSize = UDim2.new(0, 0, 0, contentSize + 20)
+    sf.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 20)
 end
 
--- Create tab buttons
+-- Tab buttons
 for i = 1, #tabs do
     local data = tabs[i]
     local b = Instance.new("TextButton")
     local bw = 50
     b.Size = UDim2.new(0, bw, 0, 26)
     b.Position = UDim2.new(0, (i-1)*(bw+3), 0, 3)
-    if data[2] == currentTab then
-        b.BackgroundColor3 = Color3.fromRGB(120,40,200)
-    else
-        b.BackgroundColor3 = Color3.fromRGB(30,28,50)
-    end
+    b.BackgroundColor3 = (data[2]==currentTab) and Color3.fromRGB(120,40,200) or Color3.fromRGB(30,28,50)
     b.Text = data[1]
     b.TextColor3 = Color3.new(1,1,1)
     b.TextScaled = true
@@ -652,33 +811,30 @@ for i = 1, #tabs do
     table.insert(tabBtns, b)
     b.MouseButton1Click:Connect(function()
         currentTab = data[2]
-        for j = 1, #tabBtns do
-            tabBtns[j].BackgroundColor3 = Color3.fromRGB(30,28,50)
-        end
+        for j = 1, #tabBtns do tabBtns[j].BackgroundColor3 = Color3.fromRGB(30,28,50) end
         b.BackgroundColor3 = Color3.fromRGB(120,40,200)
         Rebuild()
     end)
 end
 
--- Minimize
 local minimized = false
 minBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
     sf.Visible = not minimized
     tabBar.Visible = not minimized
-    if minimized then
-        main.Size = UDim2.new(0,360,0,38)
-        minBtn.Text = "+"
-    else
-        main.Size = UDim2.new(0,360,0,500)
-        minBtn.Text = "-"
-    end
+    main.Size = minimized and UDim2.new(0,360,0,38) or UDim2.new(0,360,0,500)
+    minBtn.Text = minimized and "+" or "-"
 end)
 
--- Build initial
 Rebuild()
 
--- ===== CORNER ICON =====
+-- ========= CORNER ICON =========
+local iconGui = Instance.new("ScreenGui")
+iconGui.Name = "MalXCornerIcon"
+iconGui.ResetOnSpawn = false
+iconGui.Enabled = true
+iconGui.Parent = PlayerGui
+
 local iconBtn = Instance.new("TextButton")
 iconBtn.Size = UDim2.new(0, 90, 0, 30)
 iconBtn.Position = UDim2.new(1, -100, 0, 10)
@@ -698,59 +854,160 @@ iconStroke.Color = Color3.fromRGB(120, 40, 200)
 iconStroke.Thickness = 2
 iconStroke.Parent = iconBtn
 
--- Click icon to toggle main GUI
 iconBtn.MouseButton1Click:Connect(function()
     gui.Enabled = not gui.Enabled
+    iconBtn.Text = gui.Enabled and "⚡ MalX" or "⚡ OFF"
+    iconBtn.TextColor3 = gui.Enabled and Color3.fromRGB(170,100,255) or Color3.fromRGB(255,100,100)
     if gui.Enabled then
-        iconBtn.TextColor3 = Color3.fromRGB(100, 255, 130)
-        iconBtn.Text = "⚡ ON"
-    else
-        iconBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
-        iconBtn.Text = "⚡ OFF"
+        task.delay(0.5, function() iconBtn.TextColor3 = Color3.fromRGB(170,100,255) end)
     end
-    task.delay(0.5, function()
-        iconBtn.Text = "⚡ MalX"
-        iconBtn.TextColor3 = Color3.fromRGB(170, 100, 255)
-    end)
 end)
 
--- ===== NOTIFICATION =====
-task.wait(0.3)
-clT.Text = "⚡ MalX Hub v2 loaded! Click [⚡ MalX] at top-right"
-clT.TextColor3 = Color3.fromRGB(100, 255, 130)
+-- Notification
+local notify = Instance.new("ScreenGui")
+notify.Name = "MalXLoadNotify"
+notify.ResetOnSpawn = false
+notify.Parent = PlayerGui
+local notifyT = Instance.new("TextLabel")
+notifyT.Size = UDim2.new(0, 400, 0, 40)
+notifyT.Position = UDim2.new(0.5, -200, 0.2, 0)
+notifyT.BackgroundColor3 = Color3.fromRGB(0,0,0)
+notifyT.BackgroundTransparency = 0.2
+notifyT.TextColor3 = Color3.fromRGB(100, 255, 130)
+notifyT.Text = "⚡ MalX Hub v2 loaded! Auto Farm now targets quest enemies"
+notifyT.Font = Enum.Font.SourceSansBold
+notifyT.TextSize = 16
+notifyT.TextStrokeTransparency = 0
+notifyT.Parent = notify
+Instance.new("UICorner", notifyT).CornerRadius = UDim.new(0, 8)
+task.delay(6, function() pcall(function() notify:Destroy() end) end)
 
-task.delay(5, function()
-    pcall(function() cl:Destroy() end)
-end)
-
--- ===== KEYBOARD TOGGLES =====
--- Insert key
+-- ========= KEYBOARD =========
 UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
-    if input.KeyCode == Enum.KeyCode.Insert then
+    if input.KeyCode == Enum.KeyCode.Insert or input.KeyCode == Enum.KeyCode.RightShift then
         gui.Enabled = not gui.Enabled
     end
 end)
 
--- Right Shift
-UserInputService.InputBegan:Connect(function(input, gp)
-    if gp then return end
-    if input.KeyCode == Enum.KeyCode.RightShift then
-        gui.Enabled = not gui.Enabled
-    end
-end)
-
--- ===== INFINITE JUMP =====
+-- Infinite Jump
 UserInputService.JumpRequest:Connect(function()
     if Config.InfiniteJump then
         local r = GetRoot()
-        if r then
-            r.Velocity = Vector3.new(r.Velocity.X, 60, r.Velocity.Z)
+        if r then r.Velocity = Vector3.new(r.Velocity.X, 60, r.Velocity.Z) end
+    end
+end)
+
+-- ========= STEPPED LOOP (critical for NoClip + combat) =========
+RunService.Stepped:Connect(function()
+    -- NoClip: keeps character in NoClip state
+    if Config.NoClip then
+        local h = GetHum()
+        if h then
+            pcall(function()
+                h:ChangeState(11) -- Enum.HumanoidStateType.Physics = 11
+            end)
+        end
+    end
+    
+    -- Auto Farm: equip tool and keep it equipped
+    if Config.AutoFarm then
+        local char = LocalPlayer.Character
+        if char then
+            local tool = char:FindFirstChildWhichIsA("Tool")
+            if not tool then
+                -- Equip a tool from backpack
+                local bpTool = GetBestTool()
+                if bpTool then
+                    EquipTool(bpTool)
+                end
+            end
         end
     end
 end)
 
--- ===== BACKGROUND LOOPS (no 'continue' used anywhere) =====
+-- ========= AUTO FARM LOOP =========
+coroutine.wrap(function()
+    while true do
+        task.wait(0.2)
+        
+        if not Config.AutoFarm then
+            task.wait(1)
+        else
+            -- Step 1: Auto Quest (get/handle quests)
+            if Config.AutoQuest then
+                DoAutoQuest()
+            end
+            
+            -- Step 2: Find target
+            local target = nil
+            
+            -- First: try to find enemy matching quest
+            target = GetQuestTarget()
+            
+            -- Fallback: any enemy nearby
+            if not target then
+                target = GetAnyEnemy(Config.AimbotRange or 2000)
+            end
+            
+            -- Step 3: Attack target
+            if target then
+                local hrp = target:FindFirstChild("HumanoidRootPart")
+                if hrp and GetRoot() then
+                    local root = GetRoot()
+                    
+                    -- FIX: Position in front of enemy, slightly above
+                    local lookVec = hrp.CFrame.lookVector
+                    local pos = hrp.Position - lookVec * 5 + Vector3.new(0, 2.5, 0)
+                    root.CFrame = CFrame.new(pos)
+                    
+                    -- Equip tool
+                    local char = LocalPlayer.Character
+                    local tool = char and char:FindFirstChildWhichIsA("Tool")
+                    if not tool then
+                        local bpTool = GetBestTool()
+                        if bpTool then
+                            EquipTool(bpTool)
+                            task.wait(0.1)
+                        end
+                    end
+                    
+                    -- Attack!
+                    DoAttack()
+                    
+                    -- Use skills
+                    if Config.AutoSkills then
+                        UseSkills()
+                    end
+                    
+                    -- Fast Attack = spam clicks
+                    if Config.FastAttack then
+                        for _ = 1, 3 do
+                            DoAttack()
+                            task.wait(0.05)
+                        end
+                    end
+                end
+            else
+                -- No target found, wait a bit
+                task.wait(1)
+            end
+        end
+    end
+end)()
+
+-- ========= AUTO QUEST STANDALONE =========
+-- If auto quest is on but auto farm is off, still handle quests separately
+coroutine.wrap(function()
+    while true do
+        task.wait(3)
+        if Config.AutoQuest and not Config.AutoFarm then
+            DoAutoQuest()
+        end
+    end
+end)()
+
+-- ========= OTHER LOOPS =========
 
 -- Speed
 coroutine.wrap(function()
@@ -777,23 +1034,6 @@ coroutine.wrap(function()
     end
 end)()
 
--- No Clip
-coroutine.wrap(function()
-    while true do
-        task.wait(0.1)
-        if Config.NoClip then
-            local c = LocalPlayer.Character
-            if c then
-                for _, p in pairs(c:GetDescendants()) do
-                    if p:IsA("BasePart") then
-                        p.CanCollide = false
-                    end
-                end
-            end
-        end
-    end
-end)()
-
 -- Auto Stats
 coroutine.wrap(function()
     while true do
@@ -801,7 +1041,7 @@ coroutine.wrap(function()
         if Config.AutoStatsEnabled then
             for _, v in pairs(ReplicatedStorage:GetDescendants()) do
                 if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
-                    local ok = pcall(function()
+                    pcall(function()
                         if v:IsA("RemoteFunction") then
                             v:InvokeServer("AddStats", Config.StatMode, 1)
                         else
@@ -820,11 +1060,7 @@ coroutine.wrap(function()
     while true do
         task.wait(5)
         if Config.AutoHaki then
-            local haki = LocalPlayer.Backpack:FindFirstChild("ObservationHaki")
-            if not haki then
-                local c = LocalPlayer.Character
-                if c then haki = c:FindFirstChild("ObservationHaki") end
-            end
+            local haki = LocalPlayer.Backpack:FindFirstChild("ObservationHaki") or (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("ObservationHaki"))
             if haki then
                 local h = GetHum()
                 if h then pcall(function() h:EquipTool(haki) end) end
@@ -832,9 +1068,7 @@ coroutine.wrap(function()
             task.wait(0.3)
             for _, v in pairs(ReplicatedStorage:GetDescendants()) do
                 if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
-                    pcall(function()
-                        v:FireServer("Haki", {["Key"]="ObservationHaki", ["Active"]=true})
-                    end)
+                    pcall(function() v:FireServer("Haki", {["Key"]="ObservationHaki", ["Active"]=true}) end)
                     break
                 end
             end
@@ -850,9 +1084,7 @@ coroutine.wrap(function()
             local h = GetHum()
             if h and h.Health <= 0 then
                 task.wait(3)
-                pcall(function()
-                    TeleportService:Teleport(game.PlaceId, LocalPlayer)
-                end)
+                pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
             end
         end
     end
@@ -872,50 +1104,4 @@ coroutine.wrap(function()
     end
 end)()
 
--- Auto Farm
-coroutine.wrap(function()
-    while true do
-        task.wait(0.15)
-        if Config.AutoFarm then
-            local root = GetRoot()
-            if root then
-                local target = nil
-                local tdist = math.huge
-                for _, v in pairs(Workspace:GetDescendants()) do
-                    if v:IsA("Model") and v:FindFirstChild("Humanoid") and v:FindFirstChild("HumanoidRootPart") then
-                        local hum = v:FindFirstChild("Humanoid")
-                        if hum and hum.Health > 0 and hum.MaxHealth > 0 then
-                            local isPlayer = Players:GetPlayerFromCharacter(v)
-                            if not isPlayer then
-                                local tr = v:FindFirstChild("HumanoidRootPart")
-                                local mag = (tr.Position - root.Position).Magnitude
-                                if mag < tdist and mag <= Config.AimbotRange then
-                                    target = v
-                                    tdist = mag
-                                end
-                            end
-                        end
-                    end
-                end
-                if target then
-                    local tr = target:FindFirstChild("HumanoidRootPart")
-                    root.CFrame = CFrame.new(tr.Position + Vector3.new(0,5,0))
-                    local char = LocalPlayer.Character
-                    local tool = nil
-                    if char then tool = char:FindFirstChildWhichIsA("Tool") end
-                    if tool then tool:Activate() end
-                    if Config.AutoSkills then
-                        for i = 1, 6 do
-                            VirtualInputManager:SendKeyEvent(true, tostring(i), false, game)
-                            task.wait(0.08)
-                            VirtualInputManager:SendKeyEvent(false, tostring(i), false, game)
-                            task.wait(0.3)
-                        end
-                    end
-                end
-            end
-        end
-    end
-end)()
-
-print("✅ MalX Hub v2 loaded successfully")
+print("✅ MalX Hub v2 - Combat Fixed")
